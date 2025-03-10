@@ -3,6 +3,7 @@ pragma solidity ^0.8.0;
 import "@openzeppelin/contracts/utils/structs/EnumerableMap.sol";
 import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "./IWETH.sol";
 
 interface IPermapool {
     function withdrawFees() external;
@@ -22,14 +23,15 @@ contract Governance {
         EnumerableSet.AddressSet voters;
     }
 
+    address public constant WETH = 0x4200000000000000000000000000000000000006;
     uint public constant FEE_WITHDRAWAL_DELAY = 7 * 86400; // 1 Week
     uint public constant FEE_DISTRIBUTION_DELAY = 86400; // 1 Day
     uint public constant PROPOSAL_DURATION = 7 * 86400; // 1 Week
     uint public constant MIN_SQUAD_WEIGHT = 1;
     uint public constant MAX_SQUAD_WEIGHT = 3;
 
-    address private immutable _token;
-    address private immutable _permapool;
+    address public immutable TOKEN;
+    address private immutable PERMAPOOL;
 
     EnumerableMap.AddressToUintMap _squadMemberWeights;
     EnumerableSet.AddressSet private _guardians;
@@ -50,7 +52,8 @@ contract Governance {
         address[] memory squadMembers,
         uint[] memory squadWeights
     ) {
-        uint totalSquadWeight = 0;
+        TOKEN = token;
+        PERMAPOOL = permapool;
 
         // Add the initial guardians
         for (uint i = 0; i < guardians.length; i++) {
@@ -58,6 +61,7 @@ contract Governance {
         }
 
         // Add the initial squad members and associated weights
+        uint totalSquadWeight = 0;
         for (uint i = 0; i < squadMembers.length; i++) {
             require(_squadMemberWeights.set(squadMembers[i], squadWeights[i]), "Duplicate squad member");
             require(
@@ -67,18 +71,16 @@ contract Governance {
             );
             totalSquadWeight += squadWeights[i];
         }
-
         require(totalSquadWeight > 0, "Squad weight cannot be zero");
-
         _totalSquadWeight = totalSquadWeight;
-        _permapool = permapool;
-        _token = token;
     }
+
+    receive() external payable {}
 
     // Withdraw fees from the LP position after a minimum delay
     function withdrawFees() external {
         require(block.timestamp >= _lastFeeWithdrawTime + FEE_WITHDRAWAL_DELAY, "Minimum withdraw delay not observed");
-        IPermapool(_permapool).withdrawFees();
+        IPermapool(PERMAPOOL).withdrawFees();
         _lastFeeWithdrawTime = block.timestamp;
     }
 
@@ -86,9 +88,14 @@ contract Governance {
     function distributeFees() external {
         require(block.timestamp >= _lastFeeWithdrawTime + FEE_DISTRIBUTION_DELAY, "Minimum distribute delay not observed");
 
+        uint wethBalance = IERC20(WETH).balanceOf(address(this));
+        if (wethBalance > 0) {
+            IWETH(WETH).withdraw(wethBalance);
+        }
+
         uint ethBalance = address(this).balance;
         if (ethBalance > 0) {
-            uint totalSquadWeight;
+            uint totalSquadWeight = _totalSquadWeight;
             EnumerableMap.AddressToUintMap storage squadMemberWeights = _squadMemberWeights;
             address[] memory squadMembers = squadMemberWeights.keys();
             for (uint i = 0; i < squadMembers.length; i++) {
@@ -98,7 +105,7 @@ contract Governance {
             }
         }
 
-        IERC20 token = IERC20(_token);
+        IERC20 token = IERC20(TOKEN);
         uint tokenBalance = token.balanceOf(address(this));
         if (tokenBalance > 0) {
             address[] memory guardians = _guardians.values();
@@ -126,51 +133,56 @@ contract Governance {
         (, uint currentWeight) = _squadMemberWeights.tryGet(target);
         require(currentWeight < MAX_SQUAD_WEIGHT, "Already at max squad weight");
         _proposals.push();
-        Proposal storage proposal = _proposals[_proposals.length - 1];
+        uint proposalId = _proposals.length - 1;
+        Proposal storage proposal = _proposals[proposalId];
         proposal.target = target;
         proposal.weight = currentWeight + 1;
         proposal.expiration = block.timestamp + PROPOSAL_DURATION;
-        proposal.voters.add(msg.sender);
+        vote(proposalId);
     }
 
     function proposeSquadWeightDecrease(address target, uint newWeight) external onlySquad {
         (, uint currentWeight) = _squadMemberWeights.tryGet(target);
         require(currentWeight > newWeight, "Not a decrease");
         _proposals.push();
-        Proposal storage proposal = _proposals[_proposals.length - 1];
+        uint proposalId = _proposals.length - 1;
+        Proposal storage proposal = _proposals[proposalId];
         proposal.target = target;
         proposal.weight = newWeight;
         proposal.expiration = block.timestamp + PROPOSAL_DURATION;
-        proposal.voters.add(msg.sender);
+        vote(proposalId);
     }
 
     function proposeGuardianAddition(address target) external onlySquad {
         _proposals.push();
-        Proposal storage proposal = _proposals[_proposals.length - 1];
+        uint proposalId = _proposals.length - 1;
+        Proposal storage proposal = _proposals[proposalId];
         proposal.target = target;
         proposal.weight = 1;
         proposal.guardian = true;
         proposal.expiration = block.timestamp + PROPOSAL_DURATION;
-        proposal.voters.add(msg.sender);
+        vote(proposalId);
     }
 
     function proposeGuardianRemoval(address target) external onlySquad {
         _proposals.push();
-        Proposal storage proposal = _proposals[_proposals.length - 1];
+        uint proposalId = _proposals.length - 1;
+        Proposal storage proposal = _proposals[proposalId];
         proposal.target = target;
         proposal.weight = 0;
         proposal.guardian = true;
         proposal.expiration = block.timestamp + PROPOSAL_DURATION;
-        proposal.voters.add(msg.sender);
+        vote(proposalId);
     }
 
     function proposeGovernanceUpgrade(address target) external onlySquad {
         _proposals.push();
-        Proposal storage proposal = _proposals[_proposals.length - 1];
+        uint proposalId = _proposals.length - 1;
+        Proposal storage proposal = _proposals[proposalId];
         proposal.target = target;
         proposal.governance = true;
         proposal.expiration = block.timestamp + PROPOSAL_DURATION;
-        proposal.voters.add(msg.sender);
+        vote(proposalId);
     }
 
     // Vote on a proposal. If the proposal reaces > 50%, execute it immediately
@@ -191,7 +203,7 @@ contract Governance {
         if (2 * totalVoteWeight > _totalSquadWeight) { // VOTE PASSED
             if (proposal.governance) {
                 // Upgrade the pool governance contract from this contract to a new contract
-                IPermapool(_permapool).upgradeGovernance(proposal.target);
+                IPermapool(PERMAPOOL).upgradeGovernance(proposal.target);
             } else if (proposal.guardian) {
                 // Update guardian status
                 if (proposal.weight > 0) {
@@ -266,12 +278,5 @@ contract Governance {
     }
     function getlastFeeWithdrawTime() external view returns (uint) {
         return _lastFeeWithdrawTime;
-    }
-    function getPermapool() external view returns (address) {
-        return _permapool;
-    }
-
-    function getToken() external view returns (address) {
-        return _token;
     }
 }
