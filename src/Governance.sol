@@ -81,17 +81,16 @@ contract Governance {
     function withdrawFees() external {
         require(block.timestamp >= _lastFeeWithdrawTime + FEE_WITHDRAWAL_DELAY, "Minimum withdraw delay not observed");
         IPermapool(PERMAPOOL).withdrawFees();
+        uint wethBalance = IERC20(WETH).balanceOf(address(this));
+        if (wethBalance > 0) {
+            IWETH(WETH).withdraw(wethBalance);
+        }
         _lastFeeWithdrawTime = block.timestamp;
     }
 
     // Distribute fees to squad members after a minimum delay
     function distributeFees() external {
         require(block.timestamp >= _lastFeeWithdrawTime + FEE_DISTRIBUTION_DELAY, "Minimum distribute delay not observed");
-
-        uint wethBalance = IERC20(WETH).balanceOf(address(this));
-        if (wethBalance > 0) {
-            IWETH(WETH).withdraw(wethBalance);
-        }
 
         uint ethBalance = address(this).balance;
         if (ethBalance > 0) {

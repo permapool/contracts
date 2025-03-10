@@ -11,18 +11,22 @@ import { IUniswapV3Pool } from "./Uniswap/IUniswapV3Pool.sol";
 import { ISwapRouter } from "./Uniswap/ISwapRouter.sol";
 import "./IWETH.sol";
 
+interface IGovernance {
+    function getGuardians() external returns (address[] memory);
+}
+
 contract Permapool is IERC721Receiver, Ownable {
     using EnumerableMap for EnumerableMap.AddressToUintMap;
-    
+
     ISwapRouter public constant SWAP_ROUTER = ISwapRouter(0x2626664c2603336E57B271c5C0b26F421741e481);
     INonfungiblePositionManager public constant POSITION_MANAGER = INonfungiblePositionManager(0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1);
     address public constant WETH = 0x4200000000000000000000000000000000000006;
-    uint24 public constant POOL_FEE = 10000; // Pool fee (e.g., 3000 = 0.3%)    
+    uint24 public constant POOL_FEE = 10000; // Pool fee (e.g., 3000 = 0.3%)
     address public immutable TOKEN;
     uint256 public TOKEN_ID; // Tracks the NFT ID of the LP position
-    
+
     address private _governance;
-    
+
     mapping(address => EnumerableMap.AddressToUintMap) _tokenUserDonations;
     mapping(address => EnumerableMap.AddressToUintMap) _userTokenDonations;
 
@@ -44,7 +48,7 @@ contract Permapool is IERC721Receiver, Ownable {
     function donate(address token, uint quantity) external {
         require(quantity > 0, "Invalid quantity");
         require(IERC20(token).transferFrom(msg.sender, address(this), quantity), "Unable to transfer token");
-        
+
         _donate(msg.sender, token, quantity);
     }
 
@@ -163,8 +167,23 @@ contract Permapool is IERC721Receiver, Ownable {
 
     // Allow the contract to receive ETH
     receive() external payable {
-        IWETH(WETH).deposit{value: msg.value}();
-        _donate(msg.sender, WETH, msg.value);
+        // 90% to LP
+        IWETH(WETH).deposit{value: msg.value * 9 / 10}();
+        _donate(msg.sender, WETH, msg.value * 9 / 10);
+        // 10% to Guardians
+        payGuardians();
+    }
+
+    function payGuardians() public {
+        address[] memory guardians = IGovernance(_governance).getGuardians();
+        uint balance = address(this).balance;
+        if (guardians.length > 0 && balance > 0) {
+            uint amountToSend = address(this).balance / guardians.length;
+            for (uint i = 0; i < guardians.length; i++) {
+                (bool transferred,) = guardians[i].call{value: amountToSend}("");
+                require(transferred, "Transfer failed");
+            }
+        }
     }
 
     /// @notice Allows receiving of LP NFT on contract
