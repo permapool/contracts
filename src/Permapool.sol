@@ -20,8 +20,9 @@ contract Permapool is IERC721Receiver, Ownable {
 
     ISwapRouter public constant SWAP_ROUTER = ISwapRouter(0x2626664c2603336E57B271c5C0b26F421741e481);
     INonfungiblePositionManager public constant POSITION_MANAGER = INonfungiblePositionManager(0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1);
+    IUniswapV3Factory public constant POOL_FACTORY = IUniswapV3Factory(0x33128a8fC17869897dcE68Ed026d694621f6FDfD);
     address public constant WETH = 0x4200000000000000000000000000000000000006;
-    uint24 public constant POOL_FEE = 10000; // Pool fee (e.g., 3000 = 0.3%)
+    uint24 public constant TOKEN_POOL_FEE = 10000; // Pool fee (e.g., 10000 = 1%)
     address public immutable TOKEN;
     uint256 public TOKEN_ID; // Tracks the NFT ID of the LP position
 
@@ -74,12 +75,39 @@ contract Permapool is IERC721Receiver, Ownable {
         // Approve the router to spend the tokens
         IERC20(token).approve(address(SWAP_ROUTER), type(uint256).max);
 
+
+        uint24 poolFee = 0;
+        uint topPoolLiquidity = 0;
+        address poolAddress = POOL_FACTORY.getPool(token, WETH, 10000);
+        if (poolAddress != address(0)) {
+            uint poolLiquidity = IERC20(WETH).balanceOf(poolAddress);
+            if (poolLiquidity > topPoolLiquidity) {
+                poolFee = 10000;
+            }
+        }
+        poolAddress = POOL_FACTORY.getPool(token, WETH, 3000);
+        if (poolAddress != address(0)) {
+            uint poolLiquidity = IERC20(WETH).balanceOf(poolAddress);
+            if (poolLiquidity > topPoolLiquidity) {
+                poolFee = 3000;
+            }
+        }
+        poolAddress = POOL_FACTORY.getPool(token, WETH, 500);
+        if (poolAddress != address(0)) {
+            uint poolLiquidity = IERC20(WETH).balanceOf(poolAddress);
+            if (poolLiquidity > topPoolLiquidity) {
+                poolFee = 500;
+            }
+        }
+
+        require(poolFee != 0, "Unable to convert donated token");
+
         // Perform the token-to-ETH swap
         SWAP_ROUTER.exactInputSingle(
             ISwapRouter.ExactInputSingleParams({
                 tokenIn: token,
                 tokenOut: WETH,
-                fee: POOL_FEE,
+                fee: poolFee,
                 recipient: address(this),
                 amountIn: tokenBalance,
                 amountOutMinimum: 0,
@@ -105,7 +133,7 @@ contract Permapool is IERC721Receiver, Ownable {
             ISwapRouter.ExactInputSingleParams({
                 tokenIn: WETH,
                 tokenOut: TOKEN,
-                fee: POOL_FEE,
+                fee: TOKEN_POOL_FEE,
                 recipient: address(this),
                 amountIn: halfEth,
                 amountOutMinimum: 0,
@@ -120,7 +148,7 @@ contract Permapool is IERC721Receiver, Ownable {
                 INonfungiblePositionManager.MintParams({
                     token0: WETH < TOKEN ? WETH : TOKEN,
                     token1: WETH < TOKEN ? TOKEN : WETH,
-                    fee: POOL_FEE,
+                    fee: TOKEN_POOL_FEE,
                     tickLower: -887200,
                     tickUpper: 887200,
                     amount0Desired: WETH < TOKEN ? halfEth : tokenAmount,
