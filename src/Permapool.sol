@@ -2,18 +2,16 @@
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/structs/EnumerableMap.sol";
+import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import { IERC721Receiver } from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import { INonfungiblePositionManager } from "./Uniswap/INonfungiblePositionManager.sol";
 import { IUniswapV3Factory } from "./Uniswap/IUniswapV3Factory.sol";
 import { IUniswapV3Pool } from "./Uniswap/IUniswapV3Pool.sol";
 import { ISwapRouter } from "./Uniswap/ISwapRouter.sol";
+import "./IGovernance.sol";
+import "./IPermapool.sol";
 import "./IWETH.sol";
-
-interface IGovernance {
-    function getGuardians() external returns (address[] memory);
-}
 
 contract Permapool is IPermapool, IERC721Receiver, Ownable {
     using EnumerableSet for EnumerableSet.UintSet;
@@ -34,6 +32,9 @@ contract Permapool is IPermapool, IERC721Receiver, Ownable {
     uint private _totalFees1;
     uint private _totalEthDonated;
     uint private _totalTokenDonated;
+    uint private _ethPaidToGuardians;
+    uint private _ethPaidToGovernance;
+    uint private _tokenPaidToGovernance;
 
     struct Donation {
         address user;
@@ -186,43 +187,73 @@ contract Permapool is IPermapool, IERC721Receiver, Ownable {
         _governance = governance;
     }
 
-    function collectFees() external returns (uint, uint) {
+    function collectFees() external {
         require(msg.sender == _governance, "Not authorized");
 
         INonfungiblePositionManager.CollectParams memory collectParams = INonfungiblePositionManager.CollectParams({
             tokenId: LP_TOKEN_ID,
-            recipient: _governance,
+            recipient: address(this),
             amount0Max: type(uint128).max,
             amount1Max: type(uint128).max
         });
-        (uint feesToken0, uint feesToken1) = POSITION_MANAGER.collect(collectParams);
-        _totalFees0 += feesToken0;
-        _totalFees1 += feesToken1;
-        return (feesToken0, feesToken1);
+        POSITION_MANAGER.collect(collectParams);
+
+        // All ETH LP Fees go to governance contract
+        // To be split among squad, at schedule set there
+        uint ethBalance = IWETH(WETH).balanceOf(address(this));
+        if (ethBalance > 0) {
+            IWETH(WETH).withdraw(ethBalance);
+            (bool transferred,) = _governance.call{value: ethBalance}("");
+            require(transferred, "Failed to send eth to governance");
+            _ethPaidToGovernance += ethBalance;
+        }
+
+        // TOKEN Fees go to guardians
+        // Paid instantly
+        payGuardians();
     }
 
     // Allow the contract to receive ETH
+    // Donate the ETH unless it is being unwrapped from WETH
     receive() external payable {
         if (msg.sender != WETH) {
             donate();
         }
     }
 
+    // Send any ETH and TOKEN in the contract to guardians
+    // 10% of all donations go to guardians
+    // All LP Fees in TOKEN go to guardians
     function payGuardians() public {
         address[] memory guardians = IGovernance(_governance).getGuardians();
-        uint balance = address(this).balance;
-        if (guardians.length > 0 && balance > 0) {
-            uint amountToSend = balance / guardians.length;
-            if (amountToSend > 0) {
+        if (guardians.length > 0) {
+            uint ethBalance = address(this).balance;
+            uint ethToSend = ethBalance / guardians.length;
+            if (ethToSend > 0) {
+                bool allTransferred = true;
                 for (uint i = 0; i < guardians.length; i++) {
-                    (bool transferred,) = guardians[i].call{value: amountToSend}("");
-                    require(transferred, "Transfer failed");
+                    (bool transferred,) = guardians[i].call{value: ethToSend}("");
+                    allTransferred = allTransferred && transferred;
                 }
+                require(allTransferred, "Unable to transfer eth");
+                _ethPaidToGuardians += ethToSend;
+            }
+            IERC20 token = IERC20(TOKEN);
+            uint tokenBalance = token.balanceOf(address(this));
+            uint tokenToSend = tokenBalance / guardians.length;
+            if (tokenToSend > 0) {
+                bool allTransferred = true;
+                for (uint i = 0; i < guardians.length; i++) {
+                    allTransferred = allTransferred && token.transfer(guardians[i], tokenToSend);
+                }
+                require(allTransferred, "Unable to transfer token");
+                _tokenPaidToGovernance += tokenToSend;
             }
         }
     }
 
-    // Find the most liquid token/WETH pool among UniswapV3 1%, 0.3%, 0.05% and 0.01% fee pools
+    // Find the most liquid token/WETH pool
+    // Checks UniswapV3 1%, 0.3%, 0.05% and 0.01% fee pools
     function getPoolFee(address token) public view returns (uint24 poolFee) {
         uint topPoolLiquidity = 0;
         address poolAddress = POOL_FACTORY.getPool(token, WETH, 10000);
@@ -269,10 +300,9 @@ contract Permapool is IPermapool, IERC721Receiver, Ownable {
         } else if (poolFee == 10000) {
             return (-887200, 887200);
         } else {
-            revert("Unsupported poolFee");
+            revert("Unsupported pool fee");
         }
     }
-
 
     /// @notice Allows receiving of LP NFT on contract
     function onERC721Received(
@@ -333,7 +363,20 @@ contract Permapool is IPermapool, IERC721Receiver, Ownable {
     function getTotalEthAndTokenFees() external view returns (uint, uint) {
         return WETH < TOKEN ? (_totalFees0, _totalFees1) : (_totalFees1, _totalFees0);
     }
+
     function getTotalEthAndTokenDonated() external view returns (uint, uint) {
         return (_totalEthDonated, _totalTokenDonated);
+    }
+
+    function getEthPaidToGuardians() external view returns (uint) {
+        return _ethPaidToGuardians;
+    }
+
+    function getEthPaidToGovernance() external view returns (uint) {
+        return _ethPaidToGovernance;
+    }
+
+    function getTokenPaidToGovernance() external view returns (uint) {
+        return _tokenPaidToGovernance;
     }
 }

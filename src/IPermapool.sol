@@ -2,7 +2,6 @@
 pragma solidity ^0.8.0;
 
 interface IPermapool {
-    function collectFees() external returns (uint, uint);
+    function collectFees() external ;
     function upgradeGovernance(address governance) external;
-    function TOKEN() external returns (address);
 }

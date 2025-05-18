@@ -2,33 +2,29 @@
 pragma solidity ^0.8.0;
 import "@openzeppelin/contracts/utils/structs/EnumerableMap.sol";
 import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "./IGovernance.sol";
 import "./IPermapool.sol";
-import "./IWETH.sol";
 
-contract Governance {
+contract Governance is IGovernance {
     using EnumerableMap for EnumerableMap.AddressToUintMap;
     using EnumerableSet for EnumerableSet.AddressSet;
 
     struct Proposal {
         uint id;
         address target;
+        address permapool;
         uint weight;
-        bool governance;
         uint expiration;
         bool passed;
     }
     mapping(uint => EnumerableSet.AddressSet) private _proposalVoters;
 
-    IWETH public constant WETH = IWETH(0x4200000000000000000000000000000000000006);
     uint public constant MIN_SQUAD_WEIGHT = 1;
     uint public constant MAX_SQUAD_WEIGHT = 3;
 
     uint public immutable FEE_CLAIM_DELAY;
     uint public immutable FEE_SEND_DELAY;
     uint public immutable PROPOSAL_DURATION;
-    IERC20 public immutable TOKEN;
-    IPermapool private immutable PERMAPOOL;
 
     EnumerableMap.AddressToUintMap _squadMemberWeights;
     EnumerableSet.AddressSet private _guardians;
@@ -43,15 +39,12 @@ contract Governance {
     }
 
     constructor(
-        address permapool,
         address[] memory squadMembers,
         uint[] memory squadWeights,
         uint feeClaimDelay,
         uint feeSendDelay,
         uint proposalDuration
     ) {
-        PERMAPOOL = IPermapool(permapool);
-        TOKEN = IERC20(PERMAPOOL.TOKEN());
         FEE_CLAIM_DELAY = feeClaimDelay;
         FEE_SEND_DELAY = feeSendDelay;
         PROPOSAL_DURATION = proposalDuration;
@@ -78,36 +71,30 @@ contract Governance {
     receive() external payable {}
 
     // Claim fees from the LP position after a minimum delay
-    function claimFees() external onlySquad {
+    function claimFees(address permapool) external {
         require(block.timestamp >= _lastFeeClaimTime + FEE_CLAIM_DELAY, "Minimum claim delay not observed");
-        PERMAPOOL.collectFees();
-        uint wethBalance = WETH.balanceOf(address(this));
-        if (wethBalance > 0) {
-            WETH.withdraw(wethBalance);
-        }
+        IPermapool(permapool).collectFees();
         _lastFeeClaimTime = block.timestamp;
     }
 
     // Send fees to squad members after a minimum delay
-    function sendFees() external onlySquad {
+    function sendFees() external {
         require(block.timestamp >= _lastFeeClaimTime + FEE_SEND_DELAY, "Minimum send delay not observed");
 
         uint ethBalance = address(this).balance;
-        uint tokenBalance = TOKEN.balanceOf(address(this));
-        uint totalSquadWeight = _totalSquadWeight;
-        address[] memory squadMembers = _squadMemberWeights.keys();
-        for (uint i = 0; i < squadMembers.length; i++) {
-            address member = squadMembers[i];
-            uint weight = _squadMemberWeights.get(member);
-            uint ethToSend = ethBalance * weight / totalSquadWeight;
-            uint tokenToSend = tokenBalance * weight / totalSquadWeight;
-            if (ethToSend > 0) {
-                (bool transferred,) = member.call{value: ethToSend}("");
-                require(transferred, "Transfer failed");
+        if (ethBalance > 0) {
+            uint totalSquadWeight = _totalSquadWeight;
+            address[] memory squadMembers = _squadMemberWeights.keys();
+            bool allTransferred = true;
+            for (uint i = 0; i < squadMembers.length; i++) {
+                address member = squadMembers[i];
+                uint ethToSend = ethBalance * _squadMemberWeights.get(member) / totalSquadWeight;
+                if (ethToSend > 0) {
+                    (bool transferred,) = member.call{value: ethToSend}("");
+                    allTransferred = allTransferred && transferred;
+                }
             }
-            if (tokenToSend > 0) {
-                require(TOKEN.transfer(member, tokenToSend), "Unable to transfer token");
-            }
+            require(allTransferred, "Unable to transfer eth");
         }
     }
 
@@ -138,13 +125,13 @@ contract Governance {
         vote(proposalId);
     }
 
-    function proposeGovernanceUpgrade(address target) external onlySquad {
+    function proposeGovernanceUpgrade(address permapool, address governance) external onlySquad {
         _proposals.push();
         uint proposalId = _proposals.length - 1;
         Proposal storage proposal = _proposals[proposalId];
         proposal.id = proposalId;
-        proposal.target = target;
-        proposal.governance = true;
+        proposal.target = governance;
+        proposal.permapool = permapool;
         proposal.expiration = block.timestamp + PROPOSAL_DURATION;
         vote(proposalId);
     }
@@ -163,9 +150,9 @@ contract Governance {
         if (2 * getProposalVoteWeight(proposalId) > _totalSquadWeight) {
             proposal.passed = true;
             // VOTE PASSED
-            if (proposal.governance) {
+            if (proposal.permapool != address(0)) {
                 // Vote to upgrade permapool governance
-                PERMAPOOL.upgradeGovernance(proposal.target);
+                IPermapool(proposal.permapool).upgradeGovernance(proposal.target);
             } else {
                 // Vote to update squad weights
                 (, uint oldWeight) = _squadMemberWeights.tryGet(proposal.target);
@@ -191,6 +178,10 @@ contract Governance {
 
     function getGuardians() external view returns (address[] memory) {
         return _guardians.values();
+    }
+
+    function isGuardian(address member) external view returns (bool) {
+        return _guardians.contains(member);
     }
 
     function getSquadMembers() external view returns (address[] memory) {
