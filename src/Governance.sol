@@ -2,10 +2,12 @@
 pragma solidity ^0.8.0;
 import "@openzeppelin/contracts/utils/structs/EnumerableMap.sol";
 import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 import "./IGovernance.sol";
 import "./IPermapool.sol";
 
-contract Governance is IGovernance {
+contract Governance is IGovernance, Ownable {
     using EnumerableMap for EnumerableMap.AddressToUintMap;
     using EnumerableSet for EnumerableSet.AddressSet;
 
@@ -22,14 +24,14 @@ contract Governance is IGovernance {
     uint public constant MIN_SQUAD_WEIGHT = 1;
     uint public constant MAX_SQUAD_WEIGHT = 3;
 
-    uint public immutable FEE_CLAIM_DELAY;
-    uint public immutable FEE_SEND_DELAY;
-    uint public immutable PROPOSAL_DURATION;
+    uint public FEE_CLAIM_DELAY;
+    uint public PROPOSAL_DURATION;
 
     EnumerableMap.AddressToUintMap _squadMemberWeights;
     EnumerableSet.AddressSet private _guardians;
     Proposal[] private _proposals;
 
+    uint private _unclaimedSquadEth;
     uint private _lastFeeClaimTime;
     uint private _totalSquadWeight;
 
@@ -42,11 +44,9 @@ contract Governance is IGovernance {
         address[] memory squadMembers,
         uint[] memory squadWeights,
         uint feeClaimDelay,
-        uint feeSendDelay,
         uint proposalDuration
     ) {
         FEE_CLAIM_DELAY = feeClaimDelay;
-        FEE_SEND_DELAY = feeSendDelay;
         PROPOSAL_DURATION = proposalDuration;
 
         // Add the initial squad members and associated weights
@@ -70,25 +70,62 @@ contract Governance is IGovernance {
 
     receive() external payable {}
 
+    function getDonationFees(uint donation) external pure returns (uint) {
+        // Simple 10%
+        return donation / 10;
+    }
+
+    // Send all token LP fees to guardians
+    // Save all eth LP fees for squad to claim
+    function payLpFees(address token, uint amountToken) external payable {
+        _unclaimedSquadEth += msg.value;
+
+        address[] memory guardians = _guardians.values();
+        uint tokenToSend = amountToken / guardians.length;
+        bool allTransferred = true;
+        if (tokenToSend > 0) {
+            for (uint i = 0; i < guardians.length; i++) {
+                allTransferred = allTransferred && IERC20(token).transfer(guardians[i], tokenToSend);
+            }
+        }
+        require(allTransferred, "Unable to transfer tokens");
+    }
+
+    // Send all eth donation fees to guardians
+    function payDonationFees() external payable {
+        bool allTransferred = true;
+        address[] memory guardians = _guardians.values();
+        if (guardians.length == 0) {
+            // Hold money in the contract
+            return;
+        }
+        uint ethToSend = msg.value / guardians.length;
+        if (ethToSend == 0) {
+            return;
+        }
+        for (uint i = 0; i < guardians.length; i++)  {
+            (bool transferred,) = guardians[i].call{value: ethToSend}("");
+            allTransferred = allTransferred && transferred;
+        }
+        require(allTransferred, "Unable to transfer eth");
+    }
+
     // Claim fees from the LP position after a minimum delay
     function claimFees(address permapool) external {
         require(block.timestamp >= _lastFeeClaimTime + FEE_CLAIM_DELAY, "Minimum claim delay not observed");
-        IPermapool(permapool).collectFees();
         _lastFeeClaimTime = block.timestamp;
-    }
 
-    // Send fees to squad members after a minimum delay
-    function sendFees() external {
-        require(block.timestamp >= _lastFeeClaimTime + FEE_SEND_DELAY, "Minimum send delay not observed");
+        IPermapool(permapool).collectFees();
 
-        uint ethBalance = address(this).balance;
-        if (ethBalance > 0) {
+        uint unclaimedSquadEth = _unclaimedSquadEth;
+        if (unclaimedSquadEth > 0) {
+            _unclaimedSquadEth = 0;
             uint totalSquadWeight = _totalSquadWeight;
             address[] memory squadMembers = _squadMemberWeights.keys();
             bool allTransferred = true;
-            for (uint i = 0; i < squadMembers.length; i++) {
+            for (uint i = 0; i < squadMembers.length; i++)  {
                 address member = squadMembers[i];
-                uint ethToSend = ethBalance * _squadMemberWeights.get(member) / totalSquadWeight;
+                uint ethToSend = unclaimedSquadEth * _squadMemberWeights.get(member) / totalSquadWeight;
                 if (ethToSend > 0) {
                     (bool transferred,) = member.call{value: ethToSend}("");
                     allTransferred = allTransferred && transferred;
@@ -234,5 +271,16 @@ contract Governance is IGovernance {
     }
     function getLastFeeClaimTime() external view returns (uint) {
         return _lastFeeClaimTime;
+    }
+    function getUnclaimedSquadEth() external view returns (uint) {
+        return _unclaimedSquadEth;
+    }
+
+    // Temporary; access will be renounced
+    function setFeeClaimDelay(uint delay) external onlyOwner {
+        FEE_CLAIM_DELAY = delay;
+    }
+    function setProposalDuration(uint duration) external onlyOwner {
+        PROPOSAL_DURATION = duration;
     }
 }

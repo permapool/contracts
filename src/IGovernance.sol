@@ -2,5 +2,7 @@
 pragma solidity ^0.8.0;
 
 interface IGovernance {
-    function getGuardians() external returns (address[] memory);
+    function getDonationFees(uint amountEth) external returns (uint);
+    function payLpFees(address token, uint amountToken) external payable;
+    function payDonationFees() external payable;
 }
