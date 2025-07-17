@@ -5,7 +5,7 @@
 
 ## Tests (TODO)
 
-Tests for the Rebase contract are written using Foundry.
+Tests for the Permapool contracts are written using Foundry.
 
 ### Setup
 

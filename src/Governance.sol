@@ -77,37 +77,37 @@ contract Governance is IGovernance, Ownable {
 
     // Send all token LP fees to guardians
     // Save all eth LP fees for squad to claim
-    function payLpFees(address token, uint amountToken) external payable {
+    function payLpFees(address token, uint /*amountToken*/) external payable {
         _unclaimedSquadEth += msg.value;
 
         address[] memory guardians = _guardians.values();
-        uint tokenToSend = amountToken / guardians.length;
-        bool allTransferred = true;
-        if (tokenToSend > 0) {
-            for (uint i = 0; i < guardians.length; i++) {
-                allTransferred = allTransferred && IERC20(token).transfer(guardians[i], tokenToSend);
+        uint balance = IERC20(token).balanceOf(address(this));
+        if (guardians.length > 0) {
+            uint tokenToSend = balance / guardians.length;
+            if (tokenToSend > 0) {
+                bool allTransferred = true;
+                for (uint i = 0; i < guardians.length; i++) {
+                    allTransferred = allTransferred && IERC20(token).transfer(guardians[i], tokenToSend);
+                }
+                require(allTransferred, "Unable to transfer tokens");
             }
         }
-        require(allTransferred, "Unable to transfer tokens");
     }
 
     // Send all eth donation fees to guardians
     function payDonationFees() external payable {
-        bool allTransferred = true;
         address[] memory guardians = _guardians.values();
-        if (guardians.length == 0) {
-            // Hold money in the contract
-            return;
+        if (guardians.length > 0) {
+            uint ethToSend = (address(this).balance - _unclaimedSquadEth) / guardians.length;
+            if (ethToSend > 0) {
+                bool allTransferred = true;
+                for (uint i = 0; i < guardians.length; i++)  {
+                    (bool transferred,) = guardians[i].call{value: ethToSend}("");
+                    allTransferred = allTransferred && transferred;
+                }
+                require(allTransferred, "Unable to transfer eth");
+            }
         }
-        uint ethToSend = msg.value / guardians.length;
-        if (ethToSend == 0) {
-            return;
-        }
-        for (uint i = 0; i < guardians.length; i++)  {
-            (bool transferred,) = guardians[i].call{value: ethToSend}("");
-            allTransferred = allTransferred && transferred;
-        }
-        require(allTransferred, "Unable to transfer eth");
     }
 
     // Claim fees from the LP position after a minimum delay
@@ -147,6 +147,8 @@ contract Governance is IGovernance, Ownable {
             _guardians.remove(msg.sender);
         }
         _totalSquadWeight -= oldWeight - newWeight;
+
+        require(_totalSquadWeight > 0, "Total squad weight cannot be zero");
     }
 
     function proposeWeightChange(address member, uint weight) external onlySquad {
@@ -209,6 +211,7 @@ contract Governance is IGovernance, Ownable {
                 } else if (newWeight < oldWeight) {
                     _totalSquadWeight -= oldWeight - newWeight;
                 }
+                require(_totalSquadWeight > 0, "Total squad weight cannot be zero");
             }
         }
     }
@@ -274,6 +277,9 @@ contract Governance is IGovernance, Ownable {
     }
     function getUnclaimedSquadEth() external view returns (uint) {
         return _unclaimedSquadEth;
+    }
+    function getUnclaimedGuardianEth() external view returns (uint) {
+        return address(this).balance - _unclaimedSquadEth;
     }
 
     // Temporary; access will be renounced
